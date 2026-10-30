@@ -3,7 +3,6 @@
 A Perplexity-style conversational AI answer engine. It takes a question, calls a Google Vertex AI model, and returns an answer that can be checked against its sources.
 
 > **Status:** Prototype (Sep 2025 – Mar 2026). The live server is **offline** because I could not cover the hosting cost.
-> Demo: [VIDEO / SCREENSHOTS LINK]
 
 ## What it does
 - Chat interface: the user asks a question and gets an AI-generated answer.
@@ -21,7 +20,7 @@ Browser (index.html)  ->  Node.js server (server.js)  ->  Google Vertex AI (LLM)
 - **Data format:** JSON between frontend and backend.
 
 ## How I evaluated answers
-I reviewed outputs for accuracy by comparing answers against their sources, then adjusted the prompts. [FILL IN: one concrete example, e.g. "a prompt change that reduced wrong answers on X"]
+I reviewed outputs for accuracy by comparing answers against their sources, then adjusted the prompts. 
 
 ## Run it locally
 ```bash
@@ -44,8 +43,3 @@ AI-assisted development (I direct the AI, then read, test, and debug the output)
 
 ## Limitations
 - Prototype only: no authentication, rate limiting, or automated tests.
-- [FILL IN: any known issues]
-
-## Author
-Octaraihandy Putra — Software Engineering student, SMKN 40 Jakarta (class of 2027)
-GitHub: [Octauuuzy](https://github.com/Octauuuzy)
