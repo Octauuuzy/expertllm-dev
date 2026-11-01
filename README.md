@@ -1,11 +1,7 @@
 # ExpertLLM
 
-A multi-model AI chat workspace with **sourced web research**, **image
-generation**, and **file/OCR** support — ported from a single 13,000-line
-`index.html` into a Laravel application.
-
-The frontend is a server-rendered Blade shell; the backend is a stateless JSON
-API authenticated with bearer tokens.
+A multi-model AI workspace with a sourced-research agent, image generation,
+and file/OCR input. Laravel JSON API, Blade frontend, no build step.
 
 ![Chat interface](docs/screenshots/chat.png)
 
@@ -16,16 +12,80 @@ API authenticated with bearer tokens.
 
 </details>
 
-## What it does
+## What you get
 
-The original app was one HTML file containing the markup, ~3,800 lines of CSS
-and ~8,000 lines of JavaScript, talking to a Node/Express server. This repo
-keeps the interface and behaviour and rebuilds the backend in Laravel.
+Ask a question and get an answer with numbered citations you can click through
+to the source. Switch between seven models across three providers mid-conversation.
+Generate and edit images. Drop in PDFs, Word documents, images, or audio and ask
+about them.
 
-### Chat with multiple providers
+## Why the repo is shaped like this
 
-Seven models across three providers, switchable per conversation from the
-header dropdown:
+ExpertLLM started as one `index.html`: markup, roughly 3,800 lines of CSS and
+8,000 lines of JavaScript, talking to a Node/Express server. It worked, and it
+stopped being workable. Every feature lived in the same file, so changing the
+search pipeline meant navigating ten thousand unrelated lines, and no part of it
+could be tested without loading the whole page.
+
+I rebuilt the backend in Laravel as a stateless JSON API, splitting auth, chat,
+images, the model proxy, search and fetching into separate controllers and
+services. The constraint I set was that the interface and behaviour would not
+change. The original `index.html` and `server.js` are still in the repository
+root, kept because the browser-side request builders are the reference for what
+the new API has to return.
+
+## The research loop
+
+Fact Checker mode is a four-step tool-use loop:
+
+1. The model drafts several search queries for the question.
+2. The queries go to Google Programmable Search (`/search`).
+3. The top result pages are fetched and reduced to their text content, with
+   scripts, navigation and boilerplate stripped (`/fetch-content-batch`).
+4. The model synthesises an answer that cites the pages it used. Citations render
+   as numbered chips carrying the source's favicon.
+
+The model never receives raw HTML. It receives extracted text: smaller, cheaper,
+and free of the markup that carries most prompt injection.
+
+## Designing against failure
+
+A fetch tool is an SSRF machine by default. Three guards here are deliberate
+rather than incidental, and each exists because of a specific way the system
+could be turned against its owner.
+
+**The fetcher refuses to reach inside the network.** `WebFetcher` rejects
+loopback, private, link-local and cloud-metadata addresses. A page that redirects
+to `169.254.169.254` gets an error instead of a signed identity token.
+
+**The Vertex proxy is not an open proxy.** It accepts only URLs matching
+`https://…aiplatform.googleapis.com/v1/projects/<VERTEX_PROJECT_ID>/…` and mints
+its own OAuth token. You cannot point it at another project or another API and
+have it sign the request for you.
+
+**Keys never reach the browser.** Provider credentials live in `.env`; the
+frontend names a provider, never a key. An earlier version signed JWTs in the
+page using a service-account private key. That path was removed rather than
+hidden.
+
+The test suite covers all three. The SSRF suite asserts that loopback, private,
+link-local and metadata URLs are refused.
+
+### What is still weak
+
+I would rather name these than have a reader find them.
+
+- The fetch guard resolves a URL and then fetches it. DNS rebinding between those
+  two steps is not closed.
+- There is no headless-browser tier, so JS-only pages return a per-URL error that
+  the frontend skips rather than retrying.
+- Generated images are stored as base64 in the database. Fine at current volume,
+  wrong past it.
+
+## Models
+
+Seven models across three providers, switchable per conversation from the header
+dropdown:
 
 | Name | Provider | Model |
 | --- | --- | --- |
@@ -37,44 +97,8 @@ header dropdown:
 | Kimi K2 | Vertex MaaS | `kimi-k2-32k-maas` |
 | Kimi K2 Thinking | Vertex MaaS | `kimi-k2-thinking-maas` |
 
-Responses stream token-by-token, with rendered Markdown, syntax-highlighted
-code blocks, tables, and MathJax typesetting (`\[…\]` and `$$…$$`).
-
-### Fact Checker mode
-
-A two-mode composer (General / Fact Checker). Fact Checker runs a multi-step
-research loop:
-
-1. The model drafts several search queries for the question.
-2. Queries go to Google Programmable Search (`/search`).
-3. Result pages are fetched and text-extracted (`/fetch-content-batch`), with
-   scripts, nav, and boilerplate stripped.
-4. The model synthesises an answer citing the sources, which render as
-   numbered citation chips with favicons.
-
-### Image generation and editing
-
-With **Create image** enabled, prompts route to `gemini-3-pro-image-preview`
-through `/vertex-proxy` and stream back inline image data. Generated images are
-persisted per message and can be reopened as the reference for an edit.
-
-### Files and OCR
-
-The composer accepts images, PDFs, Word documents, text, and audio:
-
-- **PDF** — parsed in the browser with pdf.js
-- **DOCX** — parsed with mammoth
-- **Images** — OCR'd with Tesseract when the selected model has no vision
-- **Audio** — sent inline for native transcription
-
-### Everything else
-
-- **Extended thinking** toggle with per-model reasoning budgets
-- **Chat history** synced to the server; sessions restore their model and tools
-- **Debug console** (`Ctrl+Shift+Q`) and an LLM payload viewer for inspecting
-  requests
-- **Storage guard** — 50 MB of message text per account, with a warning popup
-- Responsive layout down to phone widths, dark mode, and a marketing landing page
+Responses stream token by token, with rendered Markdown, syntax-highlighted code,
+tables, and MathJax (`\[…\]` and `$$…$$`).
 
 ## Architecture
 
@@ -101,17 +125,11 @@ routes/api.php ──► app/Http/Controllers/Api/*          (mounted at /)
 Design notes:
 
 - **Stateless auth.** Every API request carries `Authorization: Bearer <token>`
-  and gets a refreshed token back in `X-Auth-Token`, so sessions never expire
+  and gets a refreshed token back in `X-Auth-Token`, so a session never expires
   mid-conversation.
-- **No keys in the browser.** Provider credentials live in `.env`; the frontend
-  only ever names a *provider*, never a key.
-- **The Vertex proxy is not an open proxy.** It only accepts
-  `https://…aiplatform.googleapis.com/v1/projects/<VERTEX_PROJECT_ID>/…`, and
-  mints its own OAuth token.
-- **Primary keys stay server-side.** The ported frontend still contains the
-  original in-browser request builders, but the code path that signed JWTs with
-  a service-account private key was removed — credentials never leave the
-  server.
+- **No keys in the browser.** The frontend names a provider, never a credential.
+- **The proxy mints its own tokens** and refuses any URL outside the configured
+  project.
 
 ## Setup
 
@@ -123,8 +141,8 @@ php artisan migrate
 php artisan serve
 ```
 
-Open http://localhost:8000. Create an account from the landing page — no
-provider keys are needed to browse the UI, but chat and search require the
+Open http://localhost:8000 and create an account from the landing page. No
+provider keys are needed to browse the interface; chat and search need the
 variables below.
 
 ### Configuration
@@ -175,20 +193,21 @@ php artisan test
 - session creation with derived titles, cross-user session isolation, history
   ordering, and cascade deletes
 - image storage, raw byte streaming, and per-user visibility
-- the SSRF guard refusing loopback, private, link-local, and metadata URLs
+- the SSRF guard refusing loopback, private, link-local and metadata URLs
 
 ## Production notes
 
 - Set `APP_ENV=production`, `APP_DEBUG=false`, and a strong `JWT_SECRET`.
 - Use MySQL or PostgreSQL; SQLite is the development default.
 - Serve through nginx/Apache + PHP-FPM, not `php artisan serve`.
-- Images are stored as base64 in the database. Move to object storage if
-  volume grows.
-- The fetch endpoint blocks private/loopback/metadata addresses but not
-  DNS rebinding between resolution and request.
-- The scraper has no headless-browser tier, so JS-only pages return a per-URL
-  error that the frontend skips.
+- Images are stored as base64 in the database. Move to object storage if volume
+  grows.
+- The fetch endpoint blocks private and metadata addresses but not DNS rebinding
+  between resolution and request.
+- No headless-browser tier: JS-only pages return a per-URL error the frontend
+  skips.
 
 ## Licence
 
-MIT
+No licence is granted. This repository is public so the code can be read and
+reviewed. All rights are reserved.
