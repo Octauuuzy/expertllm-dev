@@ -53,6 +53,15 @@ return [
         'use_metadata_server' => (bool) env('USE_METADATA_SERVER', true),
     ],
 
+    /*
+    | Gemini API (Google AI Studio key). Used instead of Vertex when set; no GCP
+    | project or service account needed. The key stays server-side.
+    */
+
+    'gemini' => [
+        'api_key' => env('GEMINI_API_KEY'),
+    ],
+
     'openrouter' => [
         'api_key' => env('OPENROUTER_API_KEY'),
     ],
@@ -75,6 +84,24 @@ return [
         'keys_json' => env('GOOGLE_SEARCH_KEYS'),
         'api_key' => env('GOOGLE_SEARCH_API_KEY'),
         'cx' => env('GOOGLE_SEARCH_CX'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Web search providers
+    |--------------------------------------------------------------------------
+    |
+    | Google's Custom Search JSON API is closed to new customers. SEARCH_PROVIDER
+    | is one of serper, tavily, brave or google; if blank, the first provider
+    | with a key set is used.
+    |
+    */
+
+    'search' => [
+        'provider' => env('SEARCH_PROVIDER'),
+        'serper_key' => env('SERPER_API_KEY'),
+        'tavily_key' => env('TAVILY_API_KEY'),
+        'brave_key' => env('BRAVE_SEARCH_API_KEY'),
     ],
 
 ];

@@ -23,6 +23,8 @@ class WebFetcher
 
     private const MIN_USEFUL_LENGTH = 200;
 
+    private const MAX_REDIRECTS = 5;
+
     private const BLOCK_SIGNALS = [
         'captcha',
         'recaptcha',
@@ -53,14 +55,40 @@ class WebFetcher
         }
 
         try {
-            $response = Http::withHeaders([
-                'User-Agent' => self::USER_AGENT,
-                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
-                'Accept-Language' => 'en-US,en;q=0.9',
-            ])
-                ->timeout(self::TIMEOUT_SECONDS)
-                ->withOptions(['allow_redirects' => ['max' => 10]])
-                ->get($url);
+            // Redirects are followed by hand so every hop passes the same
+            // public-host check as the first URL. Letting the HTTP client follow
+            // them would validate only the starting address, and a public page
+            // could simply redirect to an internal one.
+            $current = $url;
+            $response = null;
+
+            for ($hop = 0; $hop <= self::MAX_REDIRECTS; $hop++) {
+                $response = Http::withHeaders([
+                    'User-Agent' => self::USER_AGENT,
+                    'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
+                    'Accept-Language' => 'en-US,en;q=0.9',
+                ])
+                    ->timeout(self::TIMEOUT_SECONDS)
+                    ->withOptions(['allow_redirects' => false])
+                    ->get($current);
+
+                if (! $response->redirect()) {
+                    break;
+                }
+
+                $next = $this->resolveRedirect($current, $response->header('Location'));
+
+                if ($next === null || ! $this->pointsToPublicHost($next)) {
+                    return ['url' => $url, 'content' => '', 'error' => 'URL is not allowed'];
+                }
+
+                $current = $next;
+                $response = null;
+            }
+
+            if ($response === null) {
+                return ['url' => $url, 'content' => '', 'error' => 'Too many redirects'];
+            }
 
             if (! $response->successful()) {
                 return ['url' => $url, 'content' => '', 'error' => 'HTTP '.$response->status()];
@@ -121,16 +149,21 @@ class WebFetcher
                 'User-Agent' => self::USER_AGENT,
                 'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
                 'Accept-Language' => 'en-US,en;q=0.9',
-            ])->timeout(self::TIMEOUT_SECONDS)->get($url),
+            ])->timeout(self::TIMEOUT_SECONDS)->withOptions(['allow_redirects' => false])->get($url),
             $allowed
         ));
 
         foreach ($allowed as $index => $url) {
             $response = $responses[$index];
 
-            $results[] = $response instanceof \Throwable
-                ? ['url' => $url, 'content' => '', 'error' => $response->getMessage()]
-                : $this->interpret($url, $response);
+            if ($response instanceof \Throwable) {
+                $results[] = ['url' => $url, 'content' => '', 'error' => $response->getMessage()];
+            } elseif ($response->redirect()) {
+                // Rare path: hand off to fetch(), which validates every hop.
+                $results[] = $this->fetch($url);
+            } else {
+                $results[] = $this->interpret($url, $response);
+            }
         }
 
         return $results;
@@ -178,6 +211,42 @@ class WebFetcher
         }
 
         return true;
+    }
+
+    /**
+     * Resolve a Location header against the URL that produced it.
+     */
+    private function resolveRedirect(string $base, string $location): ?string
+    {
+        $location = trim($location);
+
+        if ($location === '') {
+            return null;
+        }
+
+        if (preg_match('#^https?://#i', $location) === 1) {
+            return $location;
+        }
+
+        $parts = parse_url($base);
+
+        if ($parts === false || empty($parts['scheme']) || empty($parts['host'])) {
+            return null;
+        }
+
+        $origin = $parts['scheme'].'://'.$parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
+
+        if (str_starts_with($location, '//')) {
+            return $parts['scheme'].':'.$location;
+        }
+
+        if (str_starts_with($location, '/')) {
+            return $origin.$location;
+        }
+
+        $dir = rtrim(substr($parts['path'] ?? '/', 0, (int) strrpos($parts['path'] ?? '/', '/') + 1), '/');
+
+        return $origin.$dir.'/'.$location;
     }
 
     /**

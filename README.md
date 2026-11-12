@@ -39,14 +39,16 @@ the new API has to return.
 Fact Checker mode is a four-step tool-use loop:
 
 1. The model drafts several search queries for the question.
-2. The queries go to Google Programmable Search (`/search`).
+2. The queries go to a web search provider (`/search`): Serper, Tavily or Brave,\n   or legacy Google Programmable Search. Results are normalised to one shape.
 3. The top result pages are fetched and reduced to their text content, with
    scripts, navigation and boilerplate stripped (`/fetch-content-batch`).
 4. The model synthesises an answer that cites the pages it used. Citations render
    as numbered chips carrying the source's favicon.
 
 The model never receives raw HTML. It receives extracted text: smaller, cheaper,
-and free of the markup that carries most prompt injection.
+and without the scripts, styles and comments that carry much prompt
+injection. Instructions written as visible page text still reach the model, so
+fetched pages are treated as untrusted input (see below).
 
 ## Designing against failure
 
@@ -55,8 +57,9 @@ rather than incidental, and each exists because of a specific way the system
 could be turned against its owner.
 
 **The fetcher refuses to reach inside the network.** `WebFetcher` rejects
-loopback, private, link-local and cloud-metadata addresses. A page that redirects
-to `169.254.169.254` gets an error instead of a signed identity token.
+loopback, private, link-local and cloud-metadata addresses. Redirects are followed
+by hand, up to five hops, and every hop goes through the same check, so a page that
+redirects to `169.254.169.254` gets an error instead of a signed identity token.
 
 **The Vertex proxy is not an open proxy.** It accepts only URLs matching
 `https://…aiplatform.googleapis.com/v1/projects/<VERTEX_PROJECT_ID>/…` and mints
@@ -79,6 +82,8 @@ I would rather name these than have a reader find them.
   two steps is not closed.
 - There is no headless-browser tier, so JS-only pages return a per-URL error that
   the frontend skips rather than retrying.
+- Visible-text prompt injection in a fetched page is not filtered; the model's
+  answer is not checked against the page for injected instructions.
 - Generated images are stored as base64 in the database. Fine at current volume,
   wrong past it.
 
@@ -91,7 +96,8 @@ dropdown:
 | --- | --- | --- |
 | Fast | Google Vertex | `gemini-3-flash-preview` |
 | Thinking | Google Vertex | `gemini-2.5-pro` |
-| Expert Thinking | Google Vertex | `gemini-3.1-pro-preview` |
+| Expert Thinking | Google Vertex or Gemini API | `gemini-3.1-pro-preview` |
+| Gemini Argon | Gemini API (paid tier; thinking level fixed to high) | `gemini-4-argon` |
 | Deep Thinking | Chutes | `Qwen/Qwen3-235B-A22B-Thinking-2507` |
 | DeepSeek V3.1 | OpenRouter | `deepseek/deepseek-chat-v3.1:free` |
 | Kimi K2 | Vertex MaaS | `kimi-k2-32k-maas` |
@@ -150,14 +156,19 @@ variables below.
 | Variable | Purpose |
 | --- | --- |
 | `JWT_SECRET` | HMAC key for API tokens. Falls back to `APP_KEY`. |
+| `GEMINI_API_KEY` | Gemini API key from Google AI Studio. When set, Gemini models use it via `/gemini-proxy` and Vertex is not needed. |
 | `VERTEX_PROJECT_ID` | Google Cloud project used by the Vertex proxy and sent to the frontend. |
 | `VERTEX_SERVICE_ACCOUNT_JSON` | Service-account JSON, inline. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Alternative: path to a service-account file. |
 | `USE_METADATA_SERVER` | Use the GCE metadata server for Vertex tokens. |
 | `OPENROUTER_API_KEY` | OpenRouter key for `/chat/completions`. |
 | `CHUTES_API_KEY` | Chutes key for `/chat/completions`. |
-| `GOOGLE_SEARCH_API_KEY` + `GOOGLE_SEARCH_CX` | Google Programmable Search. |
-| `GOOGLE_SEARCH_KEYS` | Optional JSON array of `{apiKey, cx}` for key rotation. |
+| `SEARCH_PROVIDER` | `serper`, `tavily`, `brave` or `google`. Blank = first provider with a key. |
+| `SERPER_API_KEY` | Serper (Google results). |
+| `TAVILY_API_KEY` | Tavily. |
+| `BRAVE_SEARCH_API_KEY` | Brave Search. |
+| `GOOGLE_SEARCH_API_KEY` + `GOOGLE_SEARCH_CX` | Legacy Google Programmable Search (closed to new customers). |
+| `GOOGLE_SEARCH_KEYS` | Optional JSON array of `{apiKey, cx}` for Google key rotation. |
 
 ## API
 
@@ -176,8 +187,9 @@ variables below.
 | GET / DELETE | `/images/uploaded`, `/images/uploaded/{id}` | Uploaded images |
 | GET / DELETE | `/images/{id}` | Generated image (`?raw=true` for bytes) |
 | POST | `/vertex-proxy` | Vertex AI proxy (URL allow-listed) |
+| POST | `/gemini-proxy` | Gemini API proxy (model name only, key held server-side) |
 | POST | `/chat/completions` | OpenRouter / Chutes proxy |
-| POST | `/search` | Google search |
+| POST | `/search` | Web search (provider-neutral) |
 | POST | `/fetch-content`, `/fetch-content-batch` | Page text extraction |
 
 ## Tests
@@ -186,14 +198,19 @@ variables below.
 php artisan test
 ```
 
-24 feature tests cover:
+41 tests cover:
 
 - registration, duplicate usernames, login normalisation, and token refresh
 - 401 vs 403 behaviour and profile/preference persistence
 - session creation with derived titles, cross-user session isolation, history
   ordering, and cascade deletes
 - image storage, raw byte streaming, and per-user visibility
-- the SSRF guard refusing loopback, private, link-local and metadata URLs
+- the Gemini proxy accepting only `gemini-*` model names and forwarding
+  `maxOutputTokens` and `thinkingLevel` with the server-held key
+- search providers returning one result shape, provider selection, and failures
+  that do not leak the key
+- the SSRF guard refusing loopback, private, link-local and metadata URLs, including
+  when a public URL redirects to one (single and batch fetch)
 
 ## Production notes
 

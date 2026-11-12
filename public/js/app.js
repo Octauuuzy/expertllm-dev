@@ -37,6 +37,9 @@
                     "gemini-3.1-pro-preview": ["global"] // Gemini 3 Pro (Preview) is only served from the global endpoint
                 }
             },
+            // Gemini API (AI Studio key, held server-side). When enabled, Google models
+            // go through /gemini-proxy instead of Vertex.
+            gemini: { enabled: Boolean(APP_CONFIG.geminiApiEnabled) },
             openrouter: { enabled: true },
 
             chutes: { enabled: true },
@@ -99,6 +102,25 @@
                     defaultLevel: "LOW",
                     extendedLevel: "HIGH",
                     defaultLabel: "Low reasoning",
+                    extendedLabel: "High reasoning"
+                },
+            },
+            // Gemini Argon (gemini-4-argon). The model supports thinking_level low | medium | high;
+            // this app pins it to high. maxOutputTokens covers thinking + answer; 65,536 is the
+            // streaming cap without long decode. Sampling params (temperature/top_p/top_k) are
+            // ignored by the model.
+            argon: {
+                id: "argon",
+                provider: "google",
+                name: "Gemini Argon",
+                description: "Google's flagship model",
+                maxOutputTokens: 65536,
+                googleModelName: "gemini-4-argon",
+                supportsThinking: true,
+                thinking: {
+                    defaultLevel: "HIGH",
+                    extendedLevel: "HIGH",
+                    defaultLabel: "High reasoning",
                     extendedLabel: "High reasoning"
                 },
             },
@@ -1903,8 +1925,8 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
             const config = selectedModel.thinking || {};
             const isExtended = Boolean(appState.extendThinking);
 
-            // Gemini 3 Pro Preview uses thinkingLevel (low | high) instead of budgets
-            if (modelName.startsWith('gemini-3')) {
+            // Gemini 3+ and 4 use thinkingLevel (low | medium | high) instead of budgets
+            if (modelName.startsWith('gemini-3') || modelName.startsWith('gemini-4')) {
                 const level = (isExtended ? (config.extendedLevel || 'HIGH') : (config.defaultLevel || 'LOW')).toUpperCase();
                 const label = isExtended ? (config.extendedLabel || 'High reasoning') : (config.defaultLabel || 'Low reasoning');
                 return { mode: isExtended ? 'extended' : 'default', label, thinkingLevel: level };
@@ -1955,7 +1977,10 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
                 if (thinkingSettings) {
                     const nextThinking = {};
                     if (typeof thinkingSettings.thinkingLevel === 'string') {
-                        nextThinking.thinkingLevel = thinkingSettings.thinkingLevel;
+                        // The Gemini API documents lowercase levels; Vertex takes uppercase.
+                        nextThinking.thinkingLevel = API_CONFIG.gemini.enabled
+                            ? thinkingSettings.thinkingLevel.toLowerCase()
+                            : thinkingSettings.thinkingLevel;
                     } else if (typeof thinkingSettings.thinkingBudget === 'number') {
                         nextThinking.thinkingBudget = thinkingSettings.thinkingBudget;
                     }
@@ -2158,7 +2183,13 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
                     if (part.thought) {
                         const hasRealSignature = Boolean(part.thoughtSignature);
                         const rawSignature = part.thoughtSignature || null;
-                        const baseKey = rawSignature || `__synthetic_thought_${idx}`;
+                        // In streamGenerateContent, each thought summary arrives as parts[0]
+                        // without a signature; a new **Heading** marks a new reasoning step.
+                        const startsNewHeading = /^\s*\*\*[^*\n]+\*\*/.test(part.text || '');
+                        const syntheticIdx = startsNewHeading && thoughtOrder.length > 0
+                            ? thoughtOrder.length
+                            : Math.max(0, thoughtOrder.length - 1);
+                        const baseKey = rawSignature || `__synthetic_thought_${syntheticIdx}`;
                         const signatureKey = signaturePrefix ? `${signaturePrefix}${baseKey}` : baseKey;
                         if (!thoughtMap.has(signatureKey)) {
                             thoughtOrder.push(signatureKey);
@@ -2175,13 +2206,24 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
                             text: record.text,
                             index: thoughtOrder.indexOf(signatureKey)
                         });
-                    } else if (typeof part.text === 'string') {
-                        finalText = mergeStreamingText(finalText, part.text);
-                        if (placeholderEl && !suppressContent) {
-                            const contentEl = placeholderEl.querySelector('.message-content');
-                            if (contentEl) {
-                                contentEl.innerHTML = markdownToHtml(finalText);
-                                scrollToBottom();
+                    } else {
+                        // In generateContent streams, the signature often arrives on the
+                        // final empty-text part rather than on the thought parts themselves.
+                        if (part.thoughtSignature && thoughtOrder.length > 0) {
+                            const lastRecord = thoughtMap.get(thoughtOrder[thoughtOrder.length - 1]);
+                            if (lastRecord && !lastRecord.rawSignature) {
+                                lastRecord.rawSignature = part.thoughtSignature;
+                                lastRecord.isReal = true;
+                            }
+                        }
+                        if (typeof part.text === 'string' && part.text.length > 0) {
+                            finalText = mergeStreamingText(finalText, part.text);
+                            if (placeholderEl && !suppressContent) {
+                                const contentEl = placeholderEl.querySelector('.message-content');
+                                if (contentEl) {
+                                    contentEl.innerHTML = markdownToHtml(finalText);
+                                    scrollToBottom();
+                                }
                             }
                         }
                     }
@@ -2272,6 +2314,8 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
             }
 
             function processSseBuffer(flush = false) {
+                // Google's ?alt=sse stream uses CRLF (\r\n\r\n) between events.
+                buffer = buffer.replace(/\r\n/g, '\n');
                 let boundary;
                 while ((boundary = buffer.indexOf('\n\n')) !== -1) {
                     const eventChunk = buffer.slice(0, boundary);
@@ -2392,9 +2436,12 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
             const { placeholderEl, appliedThinking, errorContext } = options;
             const useStreaming = Boolean(placeholderEl && typeof ReadableStream !== 'undefined');
             const { projectId, locations, modelLocations } = API_CONFIG.vertex || {};
-            const targetLocations = (modelLocations && modelLocations[modelName]) || locations;
+            const useGeminiApi = API_CONFIG.gemini.enabled;
+            const targetLocations = useGeminiApi
+                ? ['gemini-api']
+                : ((modelLocations && modelLocations[modelName]) || locations);
 
-            if (!projectId) {
+            if (!useGeminiApi && !projectId) {
                 throw new Error("Vertex AI configuration (Project ID or Service Account Key) is missing.");
             }
             if (!targetLocations || !targetLocations.length) {
@@ -2405,7 +2452,9 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
                 const host = location === 'global'
                     ? 'aiplatform.googleapis.com'
                     : `${location}-aiplatform.googleapis.com`;
-                const baseUrl = `https://${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models/${modelName}`;
+                const baseUrl = useGeminiApi
+                    ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}`
+                    : `https://${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models/${modelName}`;
                 const method = useStreaming ? ':streamGenerateContent' : ':generateContent';
                 const vertexUrl = baseUrl + method;
                 const authToken = localStorage.getItem('authToken');
@@ -2427,16 +2476,17 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
                     request: { payload, useStreaming, errorContext: errorContext || null }
                 });
 
-                // Use server proxy to bypass CORS
-                const response = await fetch('/vertex-proxy', {
+                // Use server proxy to bypass CORS and keep credentials server-side.
+                // The Gemini API route takes a model name, not a URL.
+                const response = await fetch(useGeminiApi ? '/gemini-proxy' : '/vertex-proxy', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${authToken}`
                     },
-                    body: JSON.stringify({
-                        url: vertexUrl,
-                        payload: payload,}),
+                    body: JSON.stringify(useGeminiApi
+                        ? { model: modelName, stream: useStreaming, payload }
+                        : { url: vertexUrl, payload }),
                     signal
                 });
 
@@ -3413,6 +3463,7 @@ async function callApiWithFailover(apiType, apiCallFn, signal) {
                 'flash': 'Fast & efficient',
                 'pro': 'Complex math and reasoning',
                 'g3pro': 'PhD Level of reasoning',
+                'argon': "Google's flagship model",
                 'gptoss': 'This model is unavailable',
                 'deepseek': 'This model is unavailable',
                 'gpt5': 'Kimi K2 via Vertex AI',
@@ -5981,7 +6032,7 @@ ${includeJsonInstruction ? 'Output MUST be a JSON array of strings.' : ''} The c
                 if (supportsThinking) {
                     setThinkingStatus(placeholderEl, 'Preparing response...', { key: 'generalStatusEntry', defaultTitle: 'Thinking', parseColon: false });
                 }
-                if (provider === 'google') { if (!API_CONFIG.vertex || !API_CONFIG.vertex.projectId) { return { isError: true, data: 'Configuration Error: Vertex AI configuration is missing.' }; } } else if (!API_CONFIG[provider]) {
+                if (provider === 'google') { if (!API_CONFIG.gemini.enabled && (!API_CONFIG.vertex || !API_CONFIG.vertex.projectId)) { return { isError: true, data: 'Configuration Error: set GEMINI_API_KEY (or Vertex project) in .env.' }; } } else if (!API_CONFIG[provider]) {
                     return { isError: true, data: `?  **Configuration Error:** API keys for provider "${provider}" are missing.` };
                 }
 

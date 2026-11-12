@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\WebSearch;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -11,13 +12,15 @@ use Illuminate\Support\Facades\Http;
 class SearchController extends Controller
 {
     /**
-     * Google Programmable Search with key rotation on quota errors.
+     * Web search. Serper, Tavily and Brave are normalised by WebSearch into
+     * Google's {items: [{title, link, snippet}]} shape; the legacy Google path
+     * below is kept for anyone who still holds a Programmable Search key.
      *
-     * Keys come from GOOGLE_SEARCH_KEYS (JSON array of {apiKey, cx}) or the
-     * single GOOGLE_SEARCH_API_KEY/GOOGLE_SEARCH_CX pair. The result payload is
-     * passed through untouched — the frontend parses Google's schema.
+     * Google keys come from GOOGLE_SEARCH_KEYS (JSON array of {apiKey, cx}) or the
+     * single GOOGLE_SEARCH_API_KEY/GOOGLE_SEARCH_CX pair, with rotation on quota
+     * errors. Its payload is passed through untouched.
      */
-    public function search(Request $request): JsonResponse|Response
+    public function search(Request $request, WebSearch $webSearch): JsonResponse|Response
     {
         $query = (string) $request->input('query', '');
 
@@ -25,7 +28,24 @@ class SearchController extends Controller
             return response()->json(['error' => 'Query required'], 400);
         }
 
+        $provider = $webSearch->provider();
+
+        if ($provider !== null && $provider !== 'google') {
+            try {
+                return response()->json($webSearch->search(
+                    $provider,
+                    $query,
+                    (int) $request->input('num', 10),
+                    (int) $request->input('start', 1),
+                    $request->filled('siteSearch') ? (string) $request->input('siteSearch') : null,
+                ));
+            } catch (\Throwable $e) {
+                return response()->json(['error' => 'Search failed', 'details' => $e->getMessage()], 502);
+            }
+        }
+
         $keys = $this->searchKeys();
+
 
         if ($keys === []) {
             return response()->json(['error' => 'Search keys not configured'], 500);

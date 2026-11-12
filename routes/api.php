@@ -52,6 +52,7 @@ Route::middleware('auth.token')->group(function (): void {
 
     Route::middleware('throttle:120,1')->group(function (): void {
         Route::post('/vertex-proxy', [ProxyController::class, 'vertex']);
+        Route::post('/gemini-proxy', [ProxyController::class, 'gemini']);
         Route::post('/chat/completions', [ProxyController::class, 'completions']);
         Route::post('/search', [SearchController::class, 'search']);
         Route::post('/fetch-content', [FetchController::class, 'single']);

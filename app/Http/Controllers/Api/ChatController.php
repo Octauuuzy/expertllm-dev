@@ -134,6 +134,13 @@ class ChatController extends Controller
             ->exists();
 
         if (! $ownsSession) {
+            // A chat that was just opened has no row until its first message is
+            // saved, so an unknown id means "empty history", not an error. An id
+            // that exists but belongs to someone else is still refused.
+            if (! ChatSession::where('session_id', $sessionId)->exists()) {
+                return response()->json([]);
+            }
+
             return response()->json(['error' => 'Session not found'], 404);
         }
 

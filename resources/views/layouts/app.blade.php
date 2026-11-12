@@ -19,6 +19,7 @@
     <script>
         window.__APP_CONFIG__ = {!! json_encode([
             'vertexProjectId' => config('services.vertex.project_id'),
+            'geminiApiEnabled' => (string) config('services.gemini.api_key') !== '',
             'directBackendUrl' => '',
         ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) !!};
     </script>

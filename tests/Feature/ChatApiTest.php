@@ -81,6 +81,15 @@ class ChatApiTest extends TestCase
             ->assertStatus(404);
     }
 
+    public function test_history_of_a_chat_with_no_saved_messages_yet_is_empty(): void
+    {
+        $user = User::factory()->create();
+
+        $this->getJson('/chat/history?session_id=brand-new-chat', $this->auth($user))
+            ->assertOk()
+            ->assertExactJson([]);
+    }
+
     public function test_history_returns_messages_in_order(): void
     {
         $user = User::factory()->create();

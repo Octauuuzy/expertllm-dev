@@ -25,7 +25,9 @@ return [
     |
     */
 
-    'jwt_secret' => env('JWT_SECRET', env('APP_KEY')),
+    // `?:` rather than env()'s default: .env.example ships `JWT_SECRET=` (empty),
+    // and env() only falls back when the variable is unset, not when it is blank.
+    'jwt_secret' => env('JWT_SECRET') ?: env('APP_KEY'),
 
     /*
     |--------------------------------------------------------------------------
